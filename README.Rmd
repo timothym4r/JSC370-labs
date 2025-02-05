@@ -1,1 +1,3 @@
-404: Not Found
+# JSC370 Lab
+
+This is a repo that stores all the work done in JSC370 lab sessions.
