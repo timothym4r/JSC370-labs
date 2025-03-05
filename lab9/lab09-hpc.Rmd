@@ -1,0 +1,234 @@
+---
+title: "Lab 9 - HPC"
+output: 
+html_document: default
+link-citations: yes
+---
+
+# Learning goals
+
+In this lab, you are expected to practice the following skills:
+
+- Evaluate whether a problem can be parallelized or not.
+- Practice with the parallel package.
+- Use Rscript to submit jobs.
+
+```{r, echo=FALSE}
+# install any missing packages
+install.packages("microbenchmark", repos = "https://cloud.r-project.org")
+
+```
+
+## Problem 1
+
+Give yourself a few minutes to think about what you learned about parallelization. List three
+examples of problems that you believe may be solved using parallel computing,
+and check for packages on the HPC CRAN task view that may be related to it.
+
+_Answer here._
+
+Problems solved using parallelization:
+
+- Cross validation in machine learning
+- caret -> supports parallel cross-validation with 'doParallel'
+- mlr, foreach, doParallel -> for parallel model training
+
+- Bootstraping
+- boot -> for bootstraping
+- parellel -> parallelize resampling
+
+- markov chain monte carlo
+- parallel
+- rstan -> for stan for bayesian modelling
+- RcppParallel -> parallel mcmc sampling
+- nimle -> costumize bayesian inference
+
+## Problem 2: Pre-parallelization
+
+The following functions can be written to be more efficient without using
+`parallel`:
+
+1. This function generates a `n x k` dataset with all its entries having a Poisson distribution with mean `lambda`.
+
+```{r p2-fun1}
+fun1 <- function(n = 100, k = 4, lambda = 4) {
+  x <- NULL
+  
+  for (i in 1:n)
+    x <- rbind(x, rpois(k, lambda))
+  
+  return(x)
+}
+
+fun1alt <- function(n = 100, k = 4, lambda = 4) {
+  # YOUR CODE HERE
+  
+  matrix(rpois(n*k, lambda=lambda), ncol = k)
+  # allow us to pre-allocating memory
+  # rpois(n*k, lambda=lambda) enables us to generate random numbers all at once.
+}
+
+# Benchmarking
+microbenchmark::microbenchmark(
+  fun1(100),
+  fun1alt(100),
+  unit = 'us'
+)
+```
+
+How much faster?
+
+_Answer here._
+fun1alt() significantly outperforms fun1() due to efficient memory allocation and vectorized operations. The maximum execution time (max) suggests occasional performance variability, but the median time is the best indicator of typical performance. This demonstrates why avoiding loops in R (when possible) leads to major efficiency gains. 
+
+
+2.  Find the column max (hint: Checkout the function `max.col()`).
+
+```{r p2-fun2}
+# Data Generating Process (10 x 10,000 matrix)
+set.seed(1234)
+x <- matrix(rnorm(1e4), nrow=10)
+
+# Find each column's max value
+fun2 <- function(x) {
+  apply(x, 2, max)
+}
+
+fun2alt <- function(x) {
+  # YOUR CODE HERE
+  x[cbind(max.col(t(x)), 1:ncol(x))]
+  # Avoids function calls inside loops
+  # directly extracting the max values, without any loops
+}
+
+# Benchmarking
+bench = microbenchmark::microbenchmark(
+  fun2(x),
+  fun2alt(x),
+  unit = 'us'
+)
+```
+
+_Answer here with a plot._
+
+```{r}
+plot(bench)
+ggplot2::autoplot(bench) +
+  ggplot2::theme_minimal()
+```
+
+
+
+## Problem 3: Parallelize everything
+
+We will now turn our attention to non-parametric 
+[bootstrapping](https://en.wikipedia.org/wiki/Bootstrapping_(statistics)).
+Among its many uses, non-parametric bootstrapping allow us to obtain confidence
+intervals for parameter estimates without relying on parametric assumptions.
+
+The main assumption is that we can approximate many experiments by resampling
+observations from our original dataset, which reflects the population. 
+
+This function implements the non-parametric bootstrap:
+
+```{r p3-boot-fun}
+
+library(parallel)
+
+my_boot <- function(dat, stat, R, ncpus = 1L) {
+  
+  # Getting the random indices
+  n <- nrow(dat)
+  idx <- matrix(sample.int(n, n*R, TRUE), nrow=n, ncol=R)
+ 
+  # Making the cluster using `ncpus`
+  # STEP 1: GOES HERE
+  c1 = makePSOCKcluster(ncpus)
+  # creater worker nodes
+  # creating cluster for parallel computing
+  # ncpus specifying using multiple GPU cores
+  # PSOCK parallel socket cluster
+  
+  # STEP 2: GOES HERE
+  # on.exit(stopCluster(cl))
+  # export the variables to the cluster
+  clusterExport(c1, varlist = c("idx", "dat", "stat"), envir = environment())
+  # sending variables to all worker nodes
+  # each runs in isolated environment, don't have access to global variable
+  
+  
+  
+  # STEP 3: THIS FUNCTION NEEDS TO BE REPLACED WITH parLapply
+  ans <- lapply(seq_len(R), function(i) {
+    stat(dat[idx[,i], , drop=FALSE])
+  })
+  
+  # Coercing the list into a matrix
+  ans <- do.call(rbind, ans)
+  
+  # STEP 4: GOES HERE
+  
+  stopCluster(c1)
+  # why?
+  # free up system resources
+  
+  ans
+  
+}
+```
+
+1. Use the previous pseudocode, and make it work with `parallel`. Here is just an example for you to try:
+
+```{r p3-test-boot}
+
+# Bootstrap of a linear regression model
+my_stat <- function(d) coef(lm(y~x, data=d))
+
+# DATA SIM
+set.seed(1)
+n <- 500 
+R <- 1e4
+x <- cbind(rnorm(n)) 
+y <- x*5 + rnorm(n)
+
+# Check if we get something similar as lm
+ans0 <- confint(lm(y~x))
+cat("OLS CI \n")
+print(ans0)
+
+ans1 <- my_boot(dat = data.frame(x, y), my_stat, R = R, ncpus = 4)
+qs = c(0.25, .975)
+cat("Bootstrap CI")
+print(t(apply(ans1, 2, quantile, probs = qs)))
+
+
+```
+
+2. Check whether your version actually goes faster than the non-parallel version:
+
+```{r benchmark-problem3}
+# your code here
+
+parallel::detectCores()
+system.time(my_boot(dat=data.frame(x,y), my_stat, R = 50000, ncpus=1L))
+system.time(my_boot(dat=data.frame(x,y), my_stat, R = 50000, ncpus=8L))
+
+```
+
+_Answer here._
+The benchmark shows that running my_boot() with 8 cores (37.97s) is actually slower than using a single core (30.22s), with a ~25% increase in elapsed time. The higher system time suggests significant overhead from managing parallel processes, likely due to inter-process communication costs. This indicates that parallelization is inefficient for this workload, and the single-threaded version performs better.
+
+
+## Problem 4: Compile this markdown document using Rscript
+
+Once you have saved this Rmd file, try running the following command
+in your terminal:
+
+```bash
+Rscript --vanilla -e 'rmarkdown::render("[full-path-to-your-Rmd-file.Rmd]")' &
+```
+
+Where `[full-path-to-your-Rmd-file.Rmd]` should be replace with the full path to
+your Rmd file... :).
+
+
